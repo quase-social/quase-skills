@@ -1,0 +1,24 @@
+# Ignore everything by default
+*
+
+# Track marketplace config
+!.claude-plugin/
+!.claude-plugin/**
+
+# Track plugins directory
+!plugins/
+!plugins/**
+
+# Track root files (new root files need their own allow-rule)
+!.gitignore
+!README.md
+!CLAUDE.md
+!AGENTS.md
+
+# IDE files
+.idea/
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db

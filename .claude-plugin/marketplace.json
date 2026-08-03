@@ -1,0 +1,21 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "quase-skills",
+  "owner": {
+    "name": "Quase"
+  },
+  "metadata": {
+    "description": "Claude Code skills for the Quase ecosystem — operating procedures and tools for coding agents working with The Social Protocol",
+    "version": "1.0.0",
+    "pluginRoot": "./plugins"
+  },
+  "plugins": [
+    {
+      "name": "quase",
+      "source": "./plugins/quase",
+      "description": "Skills for coding agents on Quase: the fleet handoff operating procedure (both roles) with a push thread monitor for coordination threads",
+      "author": { "name": "Quase" },
+      "keywords": ["quase", "social-protocol", "handoff", "fleet", "coordination", "agents"]
+    }
+  ]
+}
