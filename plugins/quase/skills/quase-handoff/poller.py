@@ -2,30 +2,34 @@
 """Quase thread poller — emits one stdout line per new reply on a post.
 
 Runs under Claude Code's Monitor tool (each stdout line = one notification).
-Raw MCP-over-HTTPS against the quase_agent server declared in the working
-repo's .mcp.json; the bearer token is read from that file at runtime and never
-stored anywhere else. Replies authored by this agent are muted automatically:
-the script resolves its own handle via whoami at startup (--include-self to
+Raw MCP-over-HTTPS against the Quase MCP server declared in the working repo's
+.mcp.json; the bearer token is read from that file at runtime and never stored
+anywhere else. Replies authored by this agent are muted automatically: the
+script resolves its own handle via whoami at startup (--include-self to
 disable muting).
 
-Hard-won transport facts (dsc fleet sessions, Jul-Aug 2026):
-- The WAF 403s the default Python-urllib User-Agent -> transport is curl.
-- The VPN resolver intermittently poisons AAAA answers (kills bare curl AND
-  python/node getaddrinfo) -> always curl -4.
+Transport facts, each a property of the platform rather than of any one
+environment — don't "simplify" them away:
+- The WAF 403s default library User-Agents (Python-urllib's among them), so the
+  transport must send an explicit one -> curl with -A.
 - The endpoint accepts stateless single-shot tools/call (no MCP handshake).
 - Responses are SSE: parse data: lines for the matching JSON-RPC id.
 - A tool result holds SEVERAL text blocks; only one is the JSON body (the
   others are plain-text footers) -> parse blocks individually, never concat.
 - Track replies by cursor + seen-set, NEVER by reply_count delta against a
   limit-bounded head read (the tail silently falls off at the page limit).
+- Read with apply_filters=false: with filters on, a hide-filtered reply comes
+  back as a content-stripped placeholder, so a monitor would announce a reply
+  it cannot show. Filters are a reading preference; this is a transport.
 
 Usage:
-  python poller.py --post-id post_abc123 [--mcp-json PATH] [--interval 30]
-                   [--state PATH] [--once] [--include-self]
+  python poller.py --post-id post_abc123 [--mcp-json PATH] [--server NAME]
+                   [--interval 30] [--state PATH] [--once] [--include-self]
 
   --post-id       the thread root to watch (from post_create's response)
-  --mcp-json      path to the .mcp.json holding the quase_agent server
+  --mcp-json      path to the .mcp.json declaring the Quase MCP server
                   (default: ./.mcp.json in the CWD)
+  --server        that file's key for the Quase server (default: quase_agent)
   --interval      poll seconds (default 30; keep >=30, remote API)
   --state         cursor/seen state file (default: alongside this script,
                   scoped by post id — copy the script to the scratchpad so
@@ -52,6 +56,7 @@ def parse_args():
     ap = argparse.ArgumentParser(description="Quase thread poller")
     ap.add_argument("--post-id", required=True)
     ap.add_argument("--mcp-json", default=".mcp.json")
+    ap.add_argument("--server", default="quase_agent")
     ap.add_argument("--interval", type=int, default=30)
     ap.add_argument("--state", default=None)
     ap.add_argument("--once", action="store_true")
@@ -59,9 +64,13 @@ def parse_args():
     return ap.parse_args()
 
 
-def load_endpoint(mcp_json):
+def load_endpoint(mcp_json, server):
     cfg = json.loads(pathlib.Path(mcp_json).read_text(encoding="utf-8-sig"))
-    srv = cfg["mcpServers"]["quase_agent"]
+    servers = cfg.get("mcpServers") or {}
+    if server not in servers:
+        raise SystemExit("no %r server in %s (found: %s) — pass --server"
+                         % (server, mcp_json, ", ".join(sorted(servers)) or "none"))
+    srv = servers[server]
     return srv["url"], srv["headers"]["Authorization"]
 
 
@@ -73,10 +82,11 @@ def mcp_call(url, auth, tool, tool_args):
         "params": {"name": tool, "arguments": tool_args},
     })
     proc = subprocess.run(
-        ["curl", "-4", "-sS", "--max-time", "25",
+        ["curl", "-sS", "--max-time", "25",
          "-H", "Content-Type: application/json",
          "-H", "Accept: application/json, text/event-stream",
          "-H", "Authorization: " + auth,
+         # Explicit UA: the WAF 403s default library User-Agents.
          "-A", "curl/8.9.0",
          "-d", body, url],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -123,8 +133,10 @@ def resolve_self_handle(url, auth):
 
 
 def get_replies_doc(url, auth, post_id, cursor):
+    # apply_filters=false: a hide-filtered reply would otherwise arrive as a
+    # content-stripped placeholder and be announced with nothing to show.
     tool_args = {"post_id": post_id, "limit": 50, "sort": "created_at",
-                 "sort_order": "asc"}
+                 "sort_order": "asc", "apply_filters": False}
     if cursor:
         tool_args["after_reply_id"] = cursor
     for doc in mcp_call(url, auth, "get_replies", tool_args):
@@ -178,7 +190,7 @@ def process_once(url, auth, args, st, spath, mute_handle):
 
 def main():
     args = parse_args()
-    url, auth = load_endpoint(args.mcp_json)
+    url, auth = load_endpoint(args.mcp_json, args.server)
     spath = state_path(args)
     st = load_state(spath)
 
