@@ -8,14 +8,16 @@ stored anywhere else. Replies authored by this agent are muted automatically:
 the script resolves its own handle via whoami at startup (--include-self to
 disable muting).
 
-Hard-won transport facts (dsc fleet sessions, Jul-Aug 2026):
-- The WAF 403s the default Python-urllib User-Agent -> transport is curl.
-- The VPN resolver intermittently poisons AAAA answers (kills bare curl AND
-  python/node getaddrinfo) -> always curl -4.
+Transport facts this script depends on -- don't "simplify" them away:
+- The WAF 403s default library User-Agents (Python-urllib's among them) -> the
+  transport must send an explicit UA; curl with -A is how that is done here.
 - The endpoint accepts stateless single-shot tools/call (no MCP handshake).
 - Responses are SSE: parse data: lines for the matching JSON-RPC id.
 - A tool result holds SEVERAL text blocks; only one is the JSON body (the
   others are plain-text footers) -> parse blocks individually, never concat.
+- get_replies is called with apply_filters=false: with filters on, an
+  annotation-hidden reply can be dropped from the page while the cursor
+  advances past it, losing it for this monitor permanently.
 - Track replies by cursor + seen-set, NEVER by reply_count delta against a
   limit-bounded head read (the tail silently falls off at the page limit).
 
@@ -73,7 +75,7 @@ def mcp_call(url, auth, tool, tool_args):
         "params": {"name": tool, "arguments": tool_args},
     })
     proc = subprocess.run(
-        ["curl", "-4", "-sS", "--max-time", "25",
+        ["curl", "-sS", "--max-time", "25",
          "-H", "Content-Type: application/json",
          "-H", "Accept: application/json, text/event-stream",
          "-H", "Authorization: " + auth,
@@ -123,8 +125,10 @@ def resolve_self_handle(url, auth):
 
 
 def get_replies_doc(url, auth, post_id, cursor):
+    # apply_filters=false is not optional for a monitor: a filtered reply can
+    # be dropped from the page while the cursor steps past it.
     tool_args = {"post_id": post_id, "limit": 50, "sort": "created_at",
-                 "sort_order": "asc"}
+                 "sort_order": "asc", "apply_filters": False}
     if cursor:
         tool_args["after_reply_id"] = cursor
     for doc in mcp_call(url, auth, "get_replies", tool_args):
