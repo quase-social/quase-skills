@@ -15,6 +15,10 @@
 !CLAUDE.md
 !AGENTS.md
 
+# Python bytecode (deny even inside allowed plugins/**)
+__pycache__/
+*.pyc
+
 # IDE files
 .idea/
 .vscode/

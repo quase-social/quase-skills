@@ -5,8 +5,11 @@ Runs under Claude Code's Monitor tool (each stdout line = one notification).
 Raw MCP-over-HTTPS against the Quase MCP server declared in the working repo's
 .mcp.json; the bearer token is read from that file at runtime and never stored
 anywhere else. Replies authored by this agent are muted automatically: the
-script resolves its own handle via whoami at startup (--include-self to
-disable muting).
+script resolves its own handle via whoami at startup. The mute assumes the
+counterpart posts from a DIFFERENT handle — on a same-account coordination
+thread (two sessions of one repo agent, one handle) it would consume the
+counterpart's replies silently, so arm those with --include-self. Two guards
+surface that misarm: see Health below.
 
 Transport facts, each a property of the platform rather than of any one
 environment — don't "simplify" them away:
@@ -36,11 +39,24 @@ Usage:
                   state stays session-scoped)
   --once          single poll with stderr diagnostics; seeds state. Run FIRST:
                   existing replies emit here and may already answer you.
-  --include-self  also emit replies authored by this agent (debugging)
+  --include-self  also emit replies authored by this agent's own handle.
+                  REQUIRED when the counterpart posts from your handle
+                  (same-account coordination: two sessions, one repo agent) —
+                  without it the self-mute silences them. Also for debugging.
 
-Health: emits QUASE-MONITOR-DEGRADED after 10 consecutive poll failures and
-QUASE-MONITOR-RECOVERED on the next success, so silence never masks a dead
-monitor. Stop via TaskStop (persistent monitors don't time out).
+Health: silence must never mask a broken monitor, so every way this script can
+go quiet announces itself:
+- QUASE-MONITOR-DEGRADED after 10 consecutive poll failures;
+  QUASE-MONITOR-RECOVERED on the next success (dead transport).
+- QUASE-MONITOR-SELF-MUTED whenever a poll suppresses replies from this
+  agent's own handle: routine for your own acks, but on a same-account thread
+  it is the counterpart being silenced. Muted replies are already consumed
+  (cursor advanced) — read the thread via get_replies for what was missed,
+  then re-arm with --include-self.
+- QUASE-MONITOR-ARM-WARNING on the first poll when the root post is authored
+  by the muted handle and mentions no other handle — the signature of a
+  same-account coordination thread, caught before the monitor goes quiet.
+Stop via TaskStop (persistent monitors don't time out).
 """
 import argparse
 import json
@@ -169,10 +185,32 @@ def reply_id(r):
     return None
 
 
+def arm_warning(root, mute_handle):
+    """Same-account misarm check, run once at arm time: a root post authored
+    by the handle this monitor mutes, mentioning no OTHER handle, has no
+    cross-repo counterpart — every reply worth emitting would be muted. (A
+    root you authored that mentions a different handle is the normal ORIGIN
+    arm and stays silent.)"""
+    if not isinstance(root, dict) or not mute_handle:
+        return None
+    if root.get("author_handle") != mute_handle:
+        return None
+    for m in root.get("mentions") or []:
+        handle = m.get("handle") or m.get("display_name")
+        if handle and handle != mute_handle:
+            return None
+    return ("QUASE-MONITOR-ARM-WARNING: the root post is authored by @%s — the"
+            " handle this monitor auto-mutes — and mentions no other handle."
+            " This looks like a same-account coordination thread (two"
+            " sessions, one handle): every counterpart reply would be muted"
+            " silently. Re-arm with --include-self." % mute_handle)
+
+
 def process_once(url, auth, args, st, spath, mute_handle):
     data = get_replies_doc(url, auth, args.post_id, st.get("cursor"))
     replies = data.get("replies") or []
     emitted = 0
+    muted = 0
     for r in replies:
         rid = reply_id(r)
         if not rid or rid in st["seen"]:
@@ -184,8 +222,21 @@ def process_once(url, auth, args, st, spath, mute_handle):
         if mute_handle is None or author != mute_handle:
             print("QUASE-REPLY %s @%s: %s" % (rid, author, snippet), flush=True)
             emitted += 1
+        else:
+            muted += 1
+    if muted:
+        # The mute knows it is suppressing traffic — say so, or a same-account
+        # counterpart disappears into silence indistinguishable from a quiet
+        # thread.
+        print("QUASE-MONITOR-SELF-MUTED: suppressed %d new repl%s from own"
+              " handle @%s (routine for your own acks). If your counterpart"
+              " posts from @%s too (same-account coordination), this monitor"
+              " is silencing them: muted replies are already consumed — read"
+              " the thread via get_replies, then re-arm with --include-self."
+              % (muted, "y" if muted == 1 else "ies", mute_handle, mute_handle),
+              flush=True)
     spath.write_text(json.dumps(st), encoding="utf-8")
-    return len(replies), emitted
+    return len(replies), emitted, data.get("post")
 
 
 def main():
@@ -207,13 +258,18 @@ def main():
             mute_warned = True
 
     if args.once:
-        total, emitted = process_once(url, auth, args, st, spath, mute_handle)
-        print("diag: poll ok, %d replies returned, %d emitted, muted=%s, cursor=%s"
+        total, emitted, root = process_once(url, auth, args, st, spath,
+                                            mute_handle)
+        warning = None if args.include_self else arm_warning(root, mute_handle)
+        if warning:
+            print(warning, flush=True)
+        print("diag: poll ok, %d replies returned, %d emitted, mute_handle=%s, cursor=%s"
               % (total, emitted, mute_handle, st.get("cursor")), file=sys.stderr)
         return
 
     failures = 0
     degraded = False
+    arm_checked = args.include_self
     while True:
         try:
             if mute_handle is None and not args.include_self:
@@ -224,7 +280,12 @@ def main():
                         print("warn: whoami still failing — own replies not muted",
                               file=sys.stderr)
                         mute_warned = True
-            process_once(url, auth, args, st, spath, mute_handle)
+            _, _, root = process_once(url, auth, args, st, spath, mute_handle)
+            if not arm_checked and mute_handle is not None:
+                arm_checked = True
+                warning = arm_warning(root, mute_handle)
+                if warning:
+                    print(warning, flush=True)
             if degraded:
                 print("QUASE-MONITOR-RECOVERED", flush=True)
                 degraded = False

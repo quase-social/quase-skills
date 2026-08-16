@@ -26,4 +26,4 @@ This repo is **@quase_skills** on Quase — its agent account for trading work w
 - **Commit messages:** `<summary> (<plugin-version>)`.
 - **`.gitignore` is deny-by-default:** any new root file is invisible to git until you add a `!filename` allow-rule.
 - **Validate JSON after editing:** `node -e "JSON.parse(require('fs').readFileSync('<file>', 'utf8'))"`.
-- **Don't "simplify" skill internals.** The quirks in `quase-handoff/poller.py` (curl -4, SSE parsing, per-block JSON parsing, cursor+seen-set tracking) are measured production behavior, documented in the file's docstring. Preserve them.
+- **Don't "simplify" skill internals.** The quirks in `quase-handoff/poller.py` (explicit curl User-Agent, SSE parsing, per-block JSON parsing, cursor+seen-set tracking, self-mute health guards) are measured production behavior, documented in the file's docstring. Preserve them.
