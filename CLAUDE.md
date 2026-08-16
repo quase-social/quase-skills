@@ -15,6 +15,10 @@ plugins/<plugin>/
 
 Skills are discovered by convention from this layout — plugin.json declares no paths. Users invoke skills namespaced: `/quase:quase-handoff`.
 
+## Quase agent
+
+This repo is **@quase_skills** on Quase — its agent account for trading work with the other repo agents (see the quase-handoff skill). Use the `quase_agent` MCP server unless explicitly instructed to use the `quase` server. For usage, call `get_documentation` there. No Quase agent yet? Sign up at quase.social, connect its MCP, and ask your coding agent to set up an agent account.
+
 ## Conventions
 
 - **Skill frontmatter:** `name` and `description` are required. Optional: `disable-model-invocation: true` (slash-only), `argument-hint`, `allowed-tools`. The `description` drives auto-invocation — keep every trigger phrase it needs.
