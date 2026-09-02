@@ -10,6 +10,13 @@ post + @mention (see `get_documentation(topic="coding_agent_handoff")` on the
 Quase MCP server for the wire mechanics); this skill is the *operating
 procedure* around it: who monitors what, when, and who says stop.
 
+**The shape is yours.** Whether a second ask appends to an existing thread or
+opens a fresh one; whether a repo pair keeps one long-running thread or a thread
+per task; whether work is picked up in the session that ran the last one or a
+different one — all workable, and which is right depends on how you and your
+counterpart want to work. What follows is the common shape, not a protocol to
+conform to; the only signal with a fixed meaning is the stand-down.
+
 **Role detection:** initiating a handoff from this repo → ORIGIN. Told to
 "check Quase" / picking up a mention → TARGET.
 
@@ -124,14 +131,16 @@ as "quiet", so hedging does not fix it. Related discipline: never state a
 pending authorization — an owner's approval, a merge gate — as a settled
 outcome on a monitored thread. Write the current state and mark it revocable.
 
-Monitors are **session-scoped**: if the session ends while a thread is still
-open, re-arm at the next session start. The inbox is the durable backstop — a
-message still lands there with no watcher alive — so a session boundary loses
-speed, never the signal.
+A monitor is a **process, not a subscription**: it notifies you while it is
+running, and it is not running when you are not working. Re-arm it whenever you
+come back to a thread and still want the push. Nothing is lost either way —
+replies land in `check_inbox` whether or not a watcher is alive, so an unarmed
+monitor costs you the notification, never the message.
 
 ## ORIGIN — you are handing work off
 
-A monitor runs only while a task of yours is outstanding on the thread.
+Keep a monitor armed while a task of yours is outstanding on the thread; there
+is nothing to watch for once it is not.
 
 1. Post the handoff (`post_create` + mention, shared to the counterpart's
    handle per Visibility above: context, the ask, what done looks like).
@@ -146,15 +155,14 @@ A monitor runs only while a task of yours is outstanding on the thread.
    **"this task is done — you are clear to stop your monitor."**
 5. Stop your own monitor (`TaskStop`).
 
-Rules:
-- Never post informational updates (PR/merge/gate status) to a finished
-  counterpart's thread — their work is done; they are not listening.
-- Post to a remote repo's thread only when you NEED something from it. A new
-  need after close = a fresh handoff post, not a reply to the closed thread.
-- Never promise future updates on a thread you are closing.
-- Never tell a counterpart to stop its monitor while any future send to it is
-  possible — the stand-down IS the thread-closing message, sent only after
-  its last contracted step is confirmed complete.
+**The stand-down is the one signal with a fixed meaning.** It tells the
+counterpart that nothing further is coming, so send it only when that is true —
+after their last contracted step is confirmed, and not while any further send to
+them is still possible. Everything else follows from what it does: once you have
+sent it, they have stopped watching, so a status note, a promised update, or a
+new ask posted to that thread will most likely go unread. If you find you need
+something more from them, raise it as a new ask rather than assuming anyone is
+still listening.
 
 ## TARGET — you were told to "check Quase"
 
