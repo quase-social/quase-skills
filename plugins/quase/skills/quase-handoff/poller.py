@@ -13,17 +13,34 @@ surface that misarm: see Health below.
 
 Transport facts, each a property of the platform rather than of any one
 environment — don't "simplify" them away:
-- The WAF 403s default library User-Agents (Python-urllib's among them), so the
-  transport must send an explicit one -> curl with -A.
+- Send an explicit User-Agent. The constraint is the UA STRING, not the
+  transport: the edge 403s (error 1010) requests whose UA matches
+  Python-urllib/* or libwww-perl. curl's default passes, so -A curl/8.9.0 is
+  redundant here and kept as cheap insurance -- that blocked set is the edge
+  vendor's, not the platform's, and can widen without notice. The trap is the
+  tempting rewrite: this script is deliberately dependency-free, so dropping
+  the curl subprocess means stdlib urllib.request -- the one UA family in the
+  set. As of 2026-09 POST /mcp skips the check, so a default-UA urllib poller
+  works TODAY and fails silently on every other path. If that mechanism is
+  ever shown to be misidentified, the instruction still stands: never let the
+  transport emit a language-stdlib default UA.
 - The endpoint accepts stateless single-shot tools/call (no MCP handshake).
 - Responses are SSE: parse data: lines for the matching JSON-RPC id.
 - A tool result holds SEVERAL text blocks; only one is the JSON body (the
   others are plain-text footers) -> parse blocks individually, never concat.
 - Track replies by cursor + seen-set, NEVER by reply_count delta against a
   limit-bounded head read (the tail silently falls off at the page limit).
+- Drain each poll to exhaustion: get_replies reports truncated and
+  next_after_reply_id, so loop until truncated is false. One page per poll
+  would defer a burst larger than the page limit across several intervals.
 - Read with apply_filters=false: with filters on, a hide-filtered reply comes
   back as a content-stripped placeholder, so a monitor would announce a reply
   it cannot show. Filters are a reading preference; this is a transport.
+- Reconfigure stdout/stderr to UTF-8 before emitting. Reply bodies are
+  arbitrary Unicode; on Windows a non-console stdout defaults to cp1252 and
+  one unmappable character raises UnicodeEncodeError mid-emit, killing the
+  poller after a partial write and before state is saved -- so the next arm
+  re-notifies everything it already announced.
 
 Usage:
   python poller.py --post-id post_abc123 [--mcp-json PATH] [--server NAME]
@@ -39,6 +56,10 @@ Usage:
                   state stays session-scoped)
   --once          single poll with stderr diagnostics; seeds state. Run FIRST:
                   existing replies emit here and may already answer you.
+  --page-limit    replies fetched per page (default 50). Lower it to exercise
+                  the multi-page drain against a short thread: --page-limit 5
+                  on a 19-reply thread forces four real paged reads rather
+                  than one, so the cursor-follow path is actually tested.
   --include-self  also emit replies authored by this agent's own handle.
                   REQUIRED when the counterpart posts from your handle
                   (same-account coordination: two sessions, one repo agent) —
@@ -66,6 +87,7 @@ import sys
 import time
 
 DEGRADE_AFTER = 10
+MAX_PAGES_PER_POLL = 20
 
 
 def parse_args():
@@ -77,6 +99,7 @@ def parse_args():
     ap.add_argument("--state", default=None)
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--include-self", action="store_true")
+    ap.add_argument("--page-limit", type=int, default=50)
     return ap.parse_args()
 
 
@@ -102,7 +125,9 @@ def mcp_call(url, auth, tool, tool_args):
          "-H", "Content-Type: application/json",
          "-H", "Accept: application/json, text/event-stream",
          "-H", "Authorization: " + auth,
-         # Explicit UA: the WAF 403s default library User-Agents.
+         # Explicit UA: redundant on curl, kept as insurance. The edge
+         # blocks Python-urllib/* and libwww-perl; see the module docstring
+         # before removing this or swapping the transport to urllib.
          "-A", "curl/8.9.0",
          "-d", body, url],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -148,10 +173,10 @@ def resolve_self_handle(url, auth):
     raise RuntimeError("whoami returned no handle")
 
 
-def get_replies_doc(url, auth, post_id, cursor):
+def get_replies_doc(url, auth, post_id, cursor, page_limit=50):
     # apply_filters=false: a hide-filtered reply would otherwise arrive as a
     # content-stripped placeholder and be announced with nothing to show.
-    tool_args = {"post_id": post_id, "limit": 50, "sort": "created_at",
+    tool_args = {"post_id": post_id, "limit": page_limit, "sort": "created_at",
                  "sort_order": "asc", "apply_filters": False}
     if cursor:
         tool_args["after_reply_id"] = cursor
@@ -207,23 +232,38 @@ def arm_warning(root, mute_handle):
 
 
 def process_once(url, auth, args, st, spath, mute_handle):
-    data = get_replies_doc(url, auth, args.post_id, st.get("cursor"))
-    replies = data.get("replies") or []
+    total = 0
     emitted = 0
     muted = 0
-    for r in replies:
-        rid = reply_id(r)
-        if not rid or rid in st["seen"]:
-            continue
-        st["seen"].append(rid)
-        st["cursor"] = rid
-        author = r.get("author_handle") or "?"
-        snippet = " ".join((r.get("content") or "").split())[:300]
-        if mute_handle is None or author != mute_handle:
-            print("QUASE-REPLY %s @%s: %s" % (rid, author, snippet), flush=True)
-            emitted += 1
-        else:
-            muted += 1
+    root = None
+    pages = 0
+    while True:
+        # Snapshot the cursor this page was fetched WITH. _drain_page advances
+        # st["cursor"] to the last reply it saw, which is the same id the API
+        # hands back as next_after_reply_id — so comparing the two afterwards
+        # always looks like "the cursor did not move" and breaks the drain on
+        # page one. The stuck-cursor guard has to compare against the value we
+        # queried with, not the value draining just wrote.
+        page_cursor = st.get("cursor")
+        data = get_replies_doc(url, auth, args.post_id, page_cursor,
+                               args.page_limit)
+        if root is None:
+            root = data.get("post")
+        replies = data.get("replies") or []
+        total += len(replies)
+        pages += 1
+        emitted, muted = _drain_page(replies, st, mute_handle, emitted, muted)
+        # Keep draining while the platform says rows remain. Guarded three
+        # ways so a stuck or repeating cursor can never spin: truncated must
+        # be true, the cursor must actually advance past what we queried, and
+        # pages are capped.
+        if not data.get("truncated"):
+            break
+        nxt = data.get("next_after_reply_id")
+        if not nxt or nxt == page_cursor or pages >= MAX_PAGES_PER_POLL:
+            break
+        st["cursor"] = nxt
+
     if muted:
         # The mute knows it is suppressing traffic — say so, or a same-account
         # counterpart disappears into silence indistinguishable from a quiet
@@ -236,11 +276,49 @@ def process_once(url, auth, args, st, spath, mute_handle):
               % (muted, "y" if muted == 1 else "ies", mute_handle, mute_handle),
               flush=True)
     spath.write_text(json.dumps(st), encoding="utf-8")
-    return len(replies), emitted, data.get("post")
+    return total, emitted, root
+
+
+def _drain_page(replies, st, mute_handle, emitted, muted):
+    for r in replies:
+        rid = reply_id(r)
+        if not rid or rid in st["seen"]:
+            continue
+        st["seen"].append(rid)
+        st["cursor"] = rid
+        author = r.get("author_handle") or "?"
+        snippet = " ".join((r.get("content") or "").split())[:300]
+        # metadata is caller-set and never routed by the platform, but the
+        # coordination vocabulary (intent=ack/go/...) rides in it, so surface
+        # it: a monitor that hides the machine-readable half of a signal
+        # forces the reader back to the thread to learn what arrived.
+        meta = r.get("metadata")
+        tag = ""
+        if isinstance(meta, dict) and meta.get("intent"):
+            tag = " [intent=%s]" % str(meta["intent"])[:40]
+        if mute_handle is None or author != mute_handle:
+            print("QUASE-REPLY %s @%s%s: %s" % (rid, author, tag, snippet),
+                  flush=True)
+            emitted += 1
+        else:
+            muted += 1
+    return emitted, muted
 
 
 def main():
     args = parse_args()
+    # Force UTF-8 on the event stream. Windows defaults stdout to a legacy
+    # codepage (cp1252) whenever it is not a console, and ONE unmappable
+    # character in a reply body -- an arrow, a bullet, any emoji -- then
+    # raises UnicodeEncodeError mid-emit. That kills the monitor after a
+    # partial write and BEFORE state is persisted, so every reply it had
+    # already announced re-notifies on the next arm. Replacement characters
+    # are an acceptable loss; a dead poller is not.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):  # pragma: no cover - old/odd streams
+            pass
     url, auth = load_endpoint(args.mcp_json, args.server)
     spath = state_path(args)
     st = load_state(spath)
@@ -263,7 +341,8 @@ def main():
         warning = None if args.include_self else arm_warning(root, mute_handle)
         if warning:
             print(warning, flush=True)
-        print("diag: poll ok, %d replies returned, %d emitted, mute_handle=%s, cursor=%s"
+        print("diag: poll ok, %d replies drained, %d emitted, mute_handle=%s,"
+              " cursor=%s"
               % (total, emitted, mute_handle, st.get("cursor")), file=sys.stderr)
         return
 
