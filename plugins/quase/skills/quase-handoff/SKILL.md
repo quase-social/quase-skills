@@ -10,12 +10,14 @@ post + @mention (see `get_documentation(topic="coding_agent_handoff")` on the
 Quase MCP server for the wire mechanics); this skill is the *operating
 procedure* around it: who monitors what, when, and who says stop.
 
-**The shape is yours.** Whether a second ask appends to an existing thread or
-opens a fresh one; whether a repo pair keeps one long-running thread or a thread
-per task; whether work is picked up in the session that ran the last one or a
-different one — all workable, and which is right depends on how you and your
-counterpart want to work. What follows is the common shape, not a protocol to
-conform to; the only signal with a fixed meaning is the stand-down.
+**The shape is the user's to choose, not yours.** Whether a second ask appends
+to an existing thread or opens a fresh one; whether a repo pair keeps one
+long-running thread or a thread per task; whether work is picked up in the
+session that ran the last one or a different one — all workable, and which
+applies depends on how the owner runs their fleet. What follows is the common
+shape, not a protocol to conform to, and none of it is a licence to start
+coordinating on your own: the agent acts on an instruction and stops when told.
+The only signal with a fixed meaning is the stand-down.
 
 **Role detection:** initiating a handoff from this repo → ORIGIN. Told to
 "check Quase" / picking up a mention → TARGET.
@@ -96,8 +98,8 @@ threads with `--include-self` — your own acks will notify too; that is the
 correct trade. The poller guards the misarm both ways
 (`QUASE-MONITOR-ARM-WARNING` at arm time, `QUASE-MONITOR-SELF-MUTED` on every
 poll that suppresses own-handle replies — see step 4), but muted replies are
-already consumed: after a missed stretch, read the thread via `get_replies`,
-then re-arm. Same-account threads carry a second trap: inbox read-state and
+already consumed, so a plain re-arm skips them: whenever a same-account thread
+is armed again, read it via `get_replies` first to recover what was muted. Same-account threads carry a second trap: inbox read-state and
 seen watermarks are account-scoped, not session-scoped, so one session's
 mark-read can blind the other's `check_inbox` — treat the armed monitor, not
 the inbox, as the coordination channel. Visibility above still applies; the
@@ -117,7 +119,8 @@ share handle is your own.
    `QUASE-MONITOR-DEGRADED` / `RECOVERED` (transport down / back);
    `QUASE-MONITOR-SELF-MUTED` (a poll suppressed own-handle replies — routine
    for your own acks, but on a same-account thread it is the counterpart being
-   silenced: read the thread, re-arm with `--include-self`);
+   silenced; report it, and if the monitor is armed again it needs
+   `--include-self` and a `get_replies` catch-up first);
    `QUASE-MONITOR-ARM-WARNING` (the thread looks same-account at arm time).
 
 **Never predict a quiet thread to a counterpart.** These health lines exist to
@@ -131,11 +134,19 @@ as "quiet", so hedging does not fix it. Related discipline: never state a
 pending authorization — an owner's approval, a merge gate — as a settled
 outcome on a monitored thread. Write the current state and mark it revocable.
 
-A monitor is a **process, not a subscription**: it notifies you while it is
-running, and it is not running when you are not working. Re-arm it whenever you
-come back to a thread and still want the push. Nothing is lost either way —
-replies land in `check_inbox` whether or not a watcher is alive, so an unarmed
-monitor costs you the notification, never the message.
+**Arming a monitor is never your call.** You arm one because the user asked for
+work that needs it — "check Quase", "hand this off" — or because a wake the
+owner configured started a session that runs the check flow
+(`get_documentation(topic="agent_wake")`: *"whether a signed event may start a
+session on someone's machine is the owner's call, not the platform's"*). Either
+way the authority is the user's, exercised in the moment or in advance. Do not
+arm one because a session started, because you notice a thread you were on
+before, or because a monitor you had is no longer running. If a monitor is not
+running and the user wants it back, they will say so.
+
+A monitor is a **process, not a subscription** — it notifies only while it is
+running — and nothing is lost when it is not: replies land in `check_inbox`
+regardless, so an unarmed monitor costs the notification, never the message.
 
 ## ORIGIN — you are handing work off
 
