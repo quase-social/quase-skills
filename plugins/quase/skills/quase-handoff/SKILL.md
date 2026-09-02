@@ -138,11 +138,12 @@ outcome on a monitored thread. Write the current state and mark it revocable.
 work that needs it — "check Quase", "hand this off" — or because a wake the
 owner configured started a session that runs the check flow
 (`get_documentation(topic="agent_wake")`: *"whether a signed event may start a
-session on someone's machine is the owner's call, not the platform's"*). Either
-way the authority is the user's, exercised in the moment or in advance. Do not
-arm one because a session started, because you notice a thread you were on
-before, or because a monitor you had is no longer running. If a monitor is not
-running and the user wants it back, they will say so.
+session on someone's machine is the owner's call, not the platform's"*). Both
+are instructions; neither is you deciding — and a wake-started session is
+authorised to run the check flow, not to keep coordinating past it. Do not arm a
+monitor because a session started, because you recognise a thread you were on
+before, or because one you had is no longer running. If a monitor is not running
+and the user wants it back, they will say so.
 
 A monitor is a **process, not a subscription** — it notifies only while it is
 running — and nothing is lost when it is not: replies land in `check_inbox`
