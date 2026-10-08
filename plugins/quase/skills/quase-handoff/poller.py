@@ -3,13 +3,14 @@
 
 Runs under Claude Code's Monitor tool (each stdout line = one notification).
 Raw MCP-over-HTTPS against the Quase MCP server declared in the working repo's
-.mcp.json; the bearer token is read from that file at runtime and never stored
-anywhere else. Replies authored by this agent are muted automatically: the
-script resolves its own handle via whoami at startup. The mute assumes the
-counterpart posts from a DIFFERENT handle — on a same-account coordination
-thread (two sessions of one repo agent, one handle) it would consume the
-counterpart's replies silently, so arm those with --include-self. Two guards
-surface that misarm: see Health below.
+.mcp.json; the bearer token is read from that entry at runtime and never stored
+anywhere else (see Auth below for the two entry shapes it accepts). Replies
+authored by this agent are muted automatically: the script resolves its own
+handle via whoami at startup. The mute assumes the counterpart posts from a
+DIFFERENT handle — on a same-account coordination thread (two sessions of one
+repo agent, one handle) it would consume the counterpart's replies silently,
+so arm those with --include-self. Two guards surface that misarm: see Health
+below.
 
 Transport facts, each a property of the platform rather than of any one
 environment — don't "simplify" them away:
@@ -42,13 +43,29 @@ environment — don't "simplify" them away:
   poller after a partial write and before state is saved -- so the next arm
   re-notifies everything it already announced.
 
+Auth: the entry supplies Authorization as a static headers.Authorization, or
+through a headersHelper -- a shell command whose stdout is a JSON object of
+headers (e.g. one that reads the token from a file outside the repo), in
+which case the entry often has no headers key at all. The helper runs as
+Claude Code runs it: in a shell (/bin/sh; cmd.exe on Windows), from the
+.mcp.json's directory, 10 s timeout, with CLAUDE_CODE_MCP_SERVER_NAME/_URL
+set. Header names match case-insensitively, and the helper's headers override
+static ones of the same name. It runs once at startup and again before the
+next poll after any failed one -- the poller's equivalent of Claude Code
+re-running it on reconnect or a 401/403, so a helper that mints short-lived
+tokens can't wedge a long-running monitor.
+The helper's output IS the credential: no stdout line, stderr line, state
+file or error message may carry it, so its failures report an exit code or a
+shape problem and never its output.
+
 Usage:
   python poller.py --post-id post_abc123 [--mcp-json PATH] [--server NAME]
                    [--interval 30] [--state PATH] [--once] [--include-self]
 
   --post-id       the thread root to watch (from post_create's response)
   --mcp-json      path to the .mcp.json declaring the Quase MCP server
-                  (default: ./.mcp.json in the CWD)
+                  (default: ./.mcp.json in the CWD); static headers or a
+                  headersHelper, see Auth above
   --server        that file's key for the Quase server (default: quase_agent)
   --interval      poll seconds (default 30; keep >=30, remote API)
   --state         cursor/seen state file (default: alongside this script,
@@ -81,6 +98,7 @@ Stop via TaskStop (persistent monitors don't time out).
 """
 import argparse
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -88,6 +106,7 @@ import time
 
 DEGRADE_AFTER = 10
 MAX_PAGES_PER_POLL = 20
+HELPER_TIMEOUT = 10  # Claude Code gives up on a headersHelper after 10 s
 
 
 def parse_args():
@@ -109,8 +128,58 @@ def load_endpoint(mcp_json, server):
     if server not in servers:
         raise SystemExit("no %r server in %s (found: %s) — pass --server"
                          % (server, mcp_json, ", ".join(sorted(servers)) or "none"))
-    srv = servers[server]
-    return srv["url"], srv["headers"]["Authorization"]
+    return servers[server]
+
+
+def resolve_auth(srv, server, mcp_json):
+    """The entry's Authorization value: static headers, overridden by the
+    headersHelper's output when there is one (Claude Code's precedence).
+    Messages name headers, never their values."""
+    headers = {str(k).lower(): v for k, v in (srv.get("headers") or {}).items()}
+    if srv.get("headersHelper"):
+        headers.update(run_headers_helper(srv, server, mcp_json))
+    auth = headers.get("authorization")
+    if not isinstance(auth, str) or not auth.strip():
+        raise RuntimeError(
+            "server %r in %s yields no usable Authorization header (header"
+            " names found: %s) — the entry needs a string headers.Authorization"
+            " or a headersHelper that prints one"
+            % (server, mcp_json, ", ".join(sorted(headers)) or "none"))
+    return auth.strip()
+
+
+def run_headers_helper(srv, server, mcp_json):
+    """Run headersHelper the way Claude Code does: a shell, the declaring
+    .mcp.json's directory as cwd, a 10 s limit, the server name and URL in
+    the environment. Its stdout is the credential, so no failure below may
+    quote stdout or stderr — exit codes and shape problems only."""
+    env = dict(os.environ, CLAUDE_CODE_MCP_SERVER_NAME=server,
+               CLAUDE_CODE_MCP_SERVER_URL=srv.get("url", ""))
+    try:
+        proc = subprocess.run(
+            srv["headersHelper"], shell=True, env=env,
+            cwd=str(pathlib.Path(mcp_json).resolve().parent),
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=HELPER_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        # from None: TimeoutExpired holds any partial output; keep it
+        # out of the exception chain.
+        raise RuntimeError("headersHelper for %r timed out after %ds"
+                           % (server, HELPER_TIMEOUT)) from None
+    if proc.returncode != 0:
+        raise RuntimeError("headersHelper for %r exited %d (output withheld —"
+                           " it may hold the token; run it yourself to see it)"
+                           % (server, proc.returncode))
+    try:
+        headers = json.loads(proc.stdout.lstrip("\ufeff"))
+    except json.JSONDecodeError:
+        headers = None
+    if not isinstance(headers, dict):
+        raise RuntimeError("headersHelper for %r did not print a JSON object"
+                           " of headers (output withheld — it may hold the"
+                           " token)" % server)
+    return {str(k).lower(): v for k, v in headers.items()}
 
 
 def mcp_call(url, auth, tool, tool_args):
@@ -319,7 +388,12 @@ def main():
             stream.reconfigure(encoding="utf-8", errors="replace")
         except (AttributeError, ValueError):  # pragma: no cover - old/odd streams
             pass
-    url, auth = load_endpoint(args.mcp_json, args.server)
+    srv = load_endpoint(args.mcp_json, args.server)
+    url = srv["url"]
+    try:
+        auth = resolve_auth(srv, args.server, args.mcp_json)
+    except RuntimeError as e:
+        raise SystemExit("error: %s" % e)
     spath = state_path(args)
     st = load_state(spath)
 
@@ -348,9 +422,16 @@ def main():
 
     failures = 0
     degraded = False
+    reauth = False
     arm_checked = args.include_self
     while True:
         try:
+            if reauth:
+                # A failed poll is this script's reconnect: re-run the helper
+                # as Claude Code would, so an expired short-lived token heals
+                # on the next cycle instead of failing every poll from here on.
+                auth = resolve_auth(srv, args.server, args.mcp_json)
+                reauth = False
             if mute_handle is None and not args.include_self:
                 try:
                     mute_handle = resolve_self_handle(url, auth)
@@ -371,6 +452,7 @@ def main():
             failures = 0
         except Exception as e:  # noqa: BLE001 - survive anything transient
             failures += 1
+            reauth = bool(srv.get("headersHelper"))
             if failures == DEGRADE_AFTER:
                 degraded = True
                 print("QUASE-MONITOR-DEGRADED: %d consecutive poll failures (last: %s)"

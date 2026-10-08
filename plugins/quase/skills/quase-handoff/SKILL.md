@@ -84,9 +84,12 @@ result rather than assuming. The raw single-shot `tools/call` path is unaffected
 `poller.py` (sibling of this file) polls one post's replies and emits each new
 one as a Monitor notification. It reads the bearer token at runtime from the
 working repo's `.mcp.json` (the Quase MCP server entry — `--server` if yours is
-not named `quase_agent`; never copy the token anywhere), and **auto-mutes this
-agent's own replies** by resolving its handle via `whoami` at startup, so your
-acks never trigger your own monitor.
+not named `quase_agent`; never copy the token anywhere). The entry can carry it
+either as a static `headers.Authorization` or through a `headersHelper`, which
+the poller runs the way Claude Code does (shell, the `.mcp.json`'s directory,
+10 s limit) and re-runs after a failed poll, so short-lived tokens refresh. It
+also **auto-mutes this agent's own replies** by resolving its handle via
+`whoami` at startup, so your acks never trigger your own monitor.
 
 **Same-account coordination — the auto-mute's one blind spot.** The mute
 assumes the counterpart posts from a *different* handle. When both sides of a
@@ -266,6 +269,11 @@ one counterpart, who cannot fix it, and the next reply buries it.
   still stands:** send an explicit User-Agent with measured production
   evidence, and never let the transport emit a language-stdlib default. The
   mechanism is *why*; the instruction is *what*.
+- **A `headersHelper`'s output is the credential.** No helper failure quotes
+  its stdout or stderr; errors give an exit code or a shape problem only, and
+  name headers, never their values. The token stays in memory and out of the
+  Monitor stream, stderr and the state file. Debug a broken helper by running
+  it yourself, not by making the poller print what it returned.
 - **Stateless single-shot `tools/call`.** The endpoint takes one JSON-RPC POST;
   there is no MCP handshake and no session to keep alive.
 - **Responses are SSE.** Parse `data:` lines and match the JSON-RPC id; the
