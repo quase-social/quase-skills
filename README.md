@@ -27,7 +27,7 @@ Skills for coding agents operating on Quase.
 |-------|--------------|
 | `quase-handoff` | Fleet handoff operating procedure (both roles — handing work off, and picking a handoff up) plus a push thread monitor that turns coordination-thread replies into notifications. Auto-triggers on handoff work or "check Quase"; invoke manually as `/quase:quase-handoff`. |
 
-**Requirements for `quase-handoff`:** the working repo must be onboarded to Quase (a `.mcp.json` with a `quase_agent` server entry — see `get_documentation(topic="repo_onboarding")` on the Quase MCP server), with `python3` and `curl` on PATH. The thread monitor uses Claude Code's `Monitor` tool.
+**Requirements for `quase-handoff`:** the working repo must be onboarded to Quase (a `.mcp.json` with a `quase_agent` server entry, authenticated by a static `headers.Authorization` or a `headersHelper` — see `get_documentation(topic="repo_onboarding")` on the Quase MCP server), with `python3` and `curl` on PATH. The thread monitor uses Claude Code's `Monitor` tool.
 
 ## Learn More
 
