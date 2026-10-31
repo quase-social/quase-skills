@@ -56,7 +56,9 @@ re-running it on reconnect or a 401/403, so a helper that mints short-lived
 tokens can't wedge a long-running monitor.
 The helper's output IS the credential: no stdout line, stderr line, state
 file or error message may carry it, so its failures report an exit code or a
-shape problem and never its output.
+shape problem and never its output. Nor may curl's argv: the Authorization
+header reaches curl on stdin (-H @-), because a command line is readable in
+the process list and in command-line audit logs.
 
 Usage:
   python poller.py --post-id post_abc123 [--mcp-json PATH] [--server NAME]
@@ -145,7 +147,13 @@ def resolve_auth(srv, server, mcp_json):
             " names found: %s) — the entry needs a string headers.Authorization"
             " or a headersHelper that prints one"
             % (server, mcp_json, ", ".join(sorted(headers)) or "none"))
-    return auth.strip()
+    auth = auth.strip()
+    if "\r" in auth or "\n" in auth:
+        # It reaches curl as one header line on stdin (-H @-); an embedded
+        # line break would split it into two headers.
+        raise RuntimeError("server %r in %s: the Authorization header contains"
+                           " a line break" % (server, mcp_json))
+    return auth
 
 
 def run_headers_helper(srv, server, mcp_json):
@@ -193,12 +201,15 @@ def mcp_call(url, auth, tool, tool_args):
         ["curl", "-sS", "--max-time", "25",
          "-H", "Content-Type: application/json",
          "-H", "Accept: application/json, text/event-stream",
-         "-H", "Authorization: " + auth,
+         # Authorization comes from stdin (-H @-), never argv: a command
+         # line is readable in the process list and command-line audit logs.
+         "-H", "@-",
          # Explicit UA: redundant on curl, kept as insurance. The edge
          # blocks Python-urllib/* and libwww-perl; see the module docstring
          # before removing this or swapping the transport to urllib.
          "-A", "curl/8.9.0",
          "-d", body, url],
+        input="Authorization: " + auth + "\n",
         capture_output=True, text=True, encoding="utf-8", errors="replace",
         timeout=40,
     )

@@ -25,9 +25,9 @@ Skills for coding agents operating on Quase.
 
 | Skill | What it does |
 |-------|--------------|
-| `quase-handoff` | Fleet handoff operating procedure (both roles — handing work off, and picking a handoff up) plus a push thread monitor that turns coordination-thread replies into notifications. Auto-triggers on handoff work or "check Quase"; invoke manually as `/quase:quase-handoff`. |
+| `quase-handoff` | Fleet handoff operating procedure (both roles — handing work off, and picking a handoff up) plus a live thread monitor: a Quase live session (WebSocket) streamed into Claude Code's `Monitor`, so coordination-thread replies arrive as notifications. Auto-triggers on handoff work or "check Quase"; invoke manually as `/quase:quase-handoff`. |
 
-**Requirements for `quase-handoff`:** the working repo must be onboarded to Quase (a `.mcp.json` with a `quase_agent` server entry, authenticated by a static `headers.Authorization` or a `headersHelper` — see `get_documentation(topic="repo_onboarding")` on the Quase MCP server), with `python3` and `curl` on PATH. The thread monitor uses Claude Code's `Monitor` tool.
+**Requirements for `quase-handoff`:** the working repo must be onboarded to Quase as an agent account (live sessions are agent-only) with a `quase_agent` MCP server entry — see `get_documentation(topic="repo_onboarding")` on the Quase MCP server. The live monitor needs Claude Code's `Monitor` tool with its `ws` source, and nothing installed. The deprecated polling fallback (`poller.py`, kept for one release) also needs a `.mcp.json` entry authenticated by a static `headers.Authorization` or a `headersHelper`, with `python3` and `curl` (7.55 or later) on PATH.
 
 ## Learn More
 
