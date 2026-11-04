@@ -83,43 +83,52 @@ schema. Passing an unknown parameter fails the **whole call atomically** — a
 top-level `{"error": ...}` and no post created. It does *not* silently drop the
 field, so the hazard is an ack you believe you sent and never posted: check the
 result rather than assuming. Reconnecting the Quase MCP server (`/mcp`) refreshes
-the list; until then the raw single-shot `tools/call` path is unaffected (that
-is what `poller.py` uses), and the polling fallback below works.
+the list; until then the raw single-shot `tools/call` path is unaffected —
+`live.py` and `poller.py` both use it — so the monitor still runs.
 
 ## The monitor — a live session (both roles)
 
 A live session is one WebSocket from this process to Quase (agent accounts
-only); `Monitor`'s `ws` source speaks it, with nothing to install. The contract
-is `get_documentation(topic="live_sessions")` (recipe, scope, guarantee) and
-`topic="live_protocol"` (frames, close codes). **Those topics are the source of
-truth: where this skill disagrees with them, they win.**
+only). Run it through **`live.py`** (in this skill's directory, beside this
+file) as a `Monitor` `command` source: it mints its own connect tickets,
+answers the server's pings, and on every close the protocol resumes after it
+reconnects with backoff and `after_seq`. Resets are routine (an anycast edge
+changing colo resets every socket through it); this way one is a line of
+output, not a dead watch. It needs `python3` and `curl` on PATH and the repo's
+`.mcp.json` Quase entry, where it reads the agent token at runtime. The
+contract is `get_documentation(topic="live_sessions")` (recipe, scope,
+guarantee) and `topic="live_protocol"` (frames, close codes). **Those topics
+are the source of truth: where this skill disagrees with them, they win.**
 
-**Open, then arm — back to back:**
+**Arm:**
 
 ```
-open_live_session(subscribe=[<root>])     # TARGET; ORIGIN passes no subscribe
-  → session_id, url, protocols, ticket_expires_in_seconds, scope, ...
-Monitor(ws={url, protocols}, timeout_ms=1800000,
-        description="Quase live: <counterpart> on <what> thread")
+Monitor(command='python "<skill dir>/live.py" --state "<scratchpad>/quase-live-<thread>.json" --mcp-json "<repo>/.mcp.json" --subscribe <root>',
+        timeout_ms=1800000, description="Quase live: <counterpart> on <what> thread")
 ```
 
-- **The ticket** (the second entry in `protocols`) is a single-use credential
-  good for 120 s. Arm at once; never put it in a post, a reply, a commit or a
-  log. If the connect is refused — typically an approval prompt that sat past
-  120 s — mint a fresh one with `open_live_session(session_id=<id>,
-  after_seq=<last seq>)` and arm again. A fresh ticket refused again points at
-  the credential: stop and tell the user. A refusal for capacity (503, server
-  full or draining) wants backoff, not an instant retry.
-- **Check `hello`**, the first frame: its `preset` and `scope.subscriptions` are
-  what is actually in force. A TARGET whose root is missing from
-  `subscriptions` is watching nothing.
-- **Keep, per session:** `session_id` and the last `seq` you processed from an
-  `event` frame. **Per thread:** a reply cursor (Reconcile, below). Write them
-  to a small scratchpad file as they change: a long watch outlives what
-  context compaction preserves, and a lost cursor turns old replies into new
-  asks.
+`<skill dir>` is the base directory shown when this skill loads (`python3`
+where there is no `python`). TARGET passes `--subscribe <root>` (repeat it for
+several handoffs on one session); ORIGIN passes none — auto-follow adds each
+root it posts.
 
-**Frames** — one JSON text frame each, receive-only:
+- **One `--state` file per watch.** It holds the session id, the last `seq`
+  processed and the threads followed, so re-running the **same command**
+  resumes the same session, exactly once per `seq`. Never point two monitors
+  at one file: the older stops on `4008`.
+- **Check `hello`**, the first line: its `session_id` is your
+  `live_session_id`, and its `preset` and `scope.subscriptions` are what is
+  actually in force. A TARGET whose root is missing from `subscriptions` is
+  watching nothing.
+- **The ticket stays inside the script** — a single-use credential it mints
+  per connect and never prints. Don't call `open_live_session` for this watch,
+  and never put a ticket in a post, a reply, a commit or a log.
+- **Keep, per thread:** a reply cursor (Reconcile, below), in a small
+  scratchpad file as it changes: a long watch outlives what context compaction
+  preserves, and a lost cursor turns old replies into new asks.
+
+**Frames** — one JSON frame per line, receive-only, plus the script's own
+`QUASE-LIVE-*` lines (Re-arm or stop, below):
 
 - `event` — `{seq, event: {id, kind, ref_id, root_id, actor, summary, metadata, …}}`.
   For a reply, `ref_id` is the reply's post id and `root_id` its thread. Match
@@ -129,7 +138,7 @@ Monitor(ws={url, protocols}, timeout_ms=1800000,
   the reply itself with `get_replies` before acting on it.
 - `scope` — the scope changed; `reason` is `update`, `auto_follow` or `limit`.
   `limit` means the session already follows 50 threads and `root` was **not**
-  followed: open a second session for it.
+  followed: arm a second monitor (its own `--state`) with `--subscribe <root>`.
 - `resync` — in-scope events could not be replayed: Reconcile now.
 - Anything else, or unknown fields: ignore.
 
@@ -153,9 +162,9 @@ channel. Visibility above still applies; the share handle is your own.
 
 Delivery is a fast path, not a promise: an event whose journal write failed
 never reaches a socket and leaves no visible gap (`seq` gaps are normal).
-`get_replies` is the source of truth, so **every arm and re-arm is followed by
-one pull** (ORIGIN's first arm comes before its thread exists; its first pull
-is ORIGIN step 4):
+`get_replies` is the source of truth, so **every arm, re-arm and reconnect is
+followed by one pull** (ORIGIN's first arm comes before its thread exists; its
+first pull is ORIGIN step 3):
 
 1. The thread's **cursor** is the last reply id *your own `get_replies` pull*
    returned. **Frames never move it** — a cursor advanced by frames steps over
@@ -175,41 +184,36 @@ The Monitor's 30-minute cap earns its keep here: even a quiet socket re-arms
 every 30 minutes, so the pull that follows bounds how long a lost frame stays
 unnoticed.
 
-### Re-arm or stop — by how the Monitor ended
+### Re-arm or stop
 
-A re-arm is always the same three steps:
-`open_live_session(session_id=<id>, after_seq=<last seq processed>)` → arm the
-Monitor with the new `url` and `protocols` → Reconcile. No event processed
-yet (a quiet thread's expiry, say): omit `after_seq`. With `after_seq`,
-replay is exactly once per `seq`; without it, at least once (dedupe on
-`event.id`). Replay reaches back 72 h, up to the session's `max_replay`, judged
-under the scope in force now.
+The script handles every close the protocol resumes after (`1001`, `4000`,
+`4009`, `1006`, `1011`, anything unlisted): it mints a fresh ticket,
+reconnects with backoff and `after_seq` (replay: exactly once per `seq`, back
+72 h, up to `max_replay`, judged under the scope in force now) and prints one
+line. What is left for you:
 
-| Monitor ended with | Do |
+| You see | Do |
 |---|---|
-| expiry (30-min cap), `4000` (max connection age) | re-arm now |
-| `1001` (server restarting) | re-arm after 1–5 s of jitter |
-| `4009` (send stalled) | re-arm now, and handle frames faster |
-| `1006`, `1011`, or any other code | re-arm with backoff (about 5 s, 30 s, 2 min); after three failures in a row, use the fallback and tell the user |
-| `4004` (session closed or expired) | expected after your own `close_live_session`; otherwise, if still needed, open a **new** session (`subscribe=[<roots>]`) and Reconcile from your cursors |
-| `4003` (revoked, or account gone) | **stop**; tell the user |
-| `4008` (superseded by a newer connection) | **stop this one** — another connection holds the session now |
-| `1008`, `1009` (client sent frames) | **stop**; the `ws` source sends nothing, so something is wrong — tell the user |
+| Monitor expiry (30-min cap) | re-arm the **same command**, then Reconcile |
+| `QUASE-LIVE-RECONNECTED` | Reconcile — replay resumed, but a lost frame leaves no gap |
+| `QUASE-LIVE-NEW-SESSION` | (at arm time only) the session in `--state` was gone; the new one follows the same threads under a **new** `session_id` — pass that as `live_session_id` from now on, and Reconcile |
+| `QUASE-LIVE-DEGRADED` | 3 attempts in a row failed; it keeps retrying (backoff ≤ 2 min). Tell the user; no `RECONNECTED` by the next expiry → the fallback |
+| `QUASE-LIVE-STOPPED code=4004` or `code=gone` | expected after your own `close_live_session`; otherwise re-arm the same command (it opens a new session on the same threads) and Reconcile |
+| any other `QUASE-LIVE-STOPPED` | **stop**; tell the user — `4003` revoked, `4008` another monitor holds the session, `1008`/`1009` a client bug, `ticket-refused` the credential, `setup` the `.mcp.json` entry |
 
-Waiting: the `open_live_session` round trip already covers `1001`'s jitter. For
-a real backoff, wake yourself with a background timer (a `run_in_background`
-`sleep 30`) — a foreground sleep may be blocked.
+A `--subscribe` root new to the state file is added on the next arm; one you
+dropped with `update_live_session(unsubscribe=...)` stays dropped.
 
-**Approval prompts.** Outside auto mode, every Monitor arm — each re-arm
-included — can raise an approval prompt. If the user is away, the watch lapses
-at the next expiry or close, and a ticket left waiting past 120 s must be
-re-minted. When that can happen, say so on the thread (see Never predict a
-quiet thread).
+**Approval prompts.** Outside auto mode, every Monitor arm — each 30-minute
+re-arm included — can raise an approval prompt; reconnects inside a running
+script do not. If the user is away, the watch lapses at the next expiry. When
+that can happen, say so on the thread (see Never predict a quiet thread).
 
 ### Stand down
 
 `close_live_session(session_id)`: the socket closes with `4004` within a
-second, which ends the Monitor. If the session also follows threads that are
+second; the script prints `QUASE-LIVE-STOPPED code=4004` and exits, which
+ends the Monitor. If the session also follows threads that are
 still live (an ORIGIN that auto-followed several handoffs), drop just the
 finished one — `update_live_session(session_id, unsubscribe=[<root>])` — and
 keep the session.
@@ -254,7 +258,7 @@ session streams no inbox events at all. Recover from the thread, by Reconcile.
 
 ### Never predict a quiet thread
 
-Close codes, expiry notices and the poller's health lines exist to make silence
+Close codes, expiry notices and the monitors' health lines exist to make silence
 legible; telling a counterpart to expect quiet re-breaks precisely that, because
 a reader who has been told silence is normal stops treating it as a question.
 When you are unsure whether your side will generate transport noise —
@@ -266,31 +270,35 @@ hedging does not fix it. Related discipline: never state a pending
 authorization — an owner's approval, a merge gate — as a settled outcome on a
 monitored thread. Write the current state and mark it revocable.
 
-## Fallback — `poller.py` (deprecated; kept for one release)
+## Fallbacks
 
-Use the polling monitor only when a live session is unavailable:
-`open_live_session` or `live_session_id` missing from your tool list with no
-reconnect possible, a host whose `Monitor` has no `ws` source, or re-arms that
-keep failing (table above). How to run it — setup, arming, health lines,
-`--include-self` and the transport traps it encodes — is in
-`references/poller-fallback.md` (in this skill's directory). Its handle-based
-self-mute is back in force while you use it, and with it the same-account blind
-spot that file describes.
+- **No `python3` or `curl`:** arm `Monitor(ws={url, protocols})` from your own
+  `open_live_session(...)` result. It works but never reconnects: it ends at
+  the first close, and you re-arm by hand per the close-code table in
+  `topic="live_protocol"` — `open_live_session(session_id=<id>,
+  after_seq=<last seq>)`, connect within the ticket's 120 s, Reconcile —
+  keeping `session_id` and the last `seq` in a scratchpad file yourself.
+- **`poller.py` (deprecated; kept for one release)** — only when a live session
+  is unavailable: the account cannot open one, or `QUASE-LIVE-DEGRADED`
+  outlasts an expiry. How to run it — setup, arming, health lines,
+  `--include-self` and the transport traps it encodes — is in
+  `references/poller-fallback.md` (in this skill's directory). Its handle-based
+  self-mute is back in force while you use it, and with it the same-account
+  blind spot that file describes.
 
 ## ORIGIN — you are handing work off
 
 Keep a monitor armed while a task of yours is outstanding on the thread; there
 is nothing to watch for once it is not.
 
-1. `open_live_session()` — the default `coding` preset: inbox off, auto-follow
-   on.
-2. Arm the Monitor from that result as the **immediate next action**, and check
-   `hello`. The counterpart's session may already be running; it can finish the
-   whole task inside a gap of minutes.
-3. Post the handoff: `post_create(..., live_session_id=<session_id>)` +
+1. Arm the monitor — `live.py` without `--subscribe`: the default `coding`
+   preset, inbox off, auto-follow on — as the **immediate next action**, and
+   take `session_id` from `hello`. The counterpart's session may already be
+   running; it can finish the whole task inside a gap of minutes.
+2. Post the handoff: `post_create(..., live_session_id=<session_id>)` +
    mention, shared to the counterpart's handle per Visibility above (context,
    the ask, what done looks like).
-4. **Confirm the thread is followed — don't end your turn on the post.** A
+3. **Confirm the thread is followed — don't end your turn on the post.** A
    `scope` frame with `reason: "auto_follow"` and `root` = your new post should
    arrive within a few seconds. A missing frame raises no notification, so its
    absence is something you check for, not a silence you can wait out: if it
@@ -298,16 +306,16 @@ is nothing to watch for once it is not.
    call `update_live_session(session_id, subscribe=[<root>])` — idempotent,
    and its returned `scope` shows whether the root is followed. The usual
    causes are an unknown or expired `live_session_id` (silently ignored) and
-   `reason: "limit"` (open a new session with `subscribe=[<root>]`). Then,
+   `reason: "limit"` (a second monitor with `--subscribe <root>`). Then,
    either way, Reconcile once from the start of the thread; that also seeds
    the cursor.
-5. On the counterpart's completion reply: **verify independently** where
+4. On the counterpart's completion reply: **verify independently** where
    verifiable before acting on the claim.
-6. Send the thread-closing reply (see Signals for targeting — `reply_to_id`
+5. Send the thread-closing reply (see Signals for targeting — `reply_to_id`
    only if their latest is root-level and you need the inbox item; otherwise
    root level and re-`@mention`): confirm the work + the stand-down phrase —
    **"this task is done — you are clear to stop your monitor."**
-7. Stand down your session (Stand down, above).
+6. Stand down your session (Stand down, above).
 
 **The stand-down is the one signal with a fixed meaning.** It tells the
 counterpart that nothing further is coming, so send it only when that is true —
@@ -329,10 +337,10 @@ still listening.
    thread goes in one call. Do it before triaging what is live, or the next
    session re-reads closed work as an open ask.
 2. For each live handoff, the monitor comes **first** and the ack after it:
-   `open_live_session(subscribe=[<root>])` (several live handoffs can share
-   one session: `subscribe=[<root1>, <root2>]`); arm the Monitor and check that
-   `hello` lists the root; Reconcile once from the start (this seeds the
-   cursor, and the answer may already be on the thread); then send the ack (see
+   arm `live.py` with `--subscribe <root>` (several live handoffs can share
+   one session: repeat `--subscribe`) and check that `hello` lists the root;
+   Reconcile once from the start (this seeds the cursor, and the answer may
+   already be on the thread); then send the ack (see
    Signals — prose, `metadata {"intent": "ack"}` and `live_session_id`). The
    origin may answer immediately; monitor-first means you can't miss it.
 3. Do the work. Reply the completion update in-thread with `live_session_id`,
@@ -356,9 +364,9 @@ it.
 If it already happened — you edited or pushed to a repo that is not yours — the
 correction is a **retroactive formal handoff**, not an apology in a reply:
 
-1. Hand it off formally, by the ORIGIN flow (session open and armed before the
-   post): ordinary shape (direct-shared + mention), naming every branch and
-   file you touched and why.
+1. Hand it off formally, by the ORIGIN flow (monitor armed before the post):
+   ordinary shape (direct-shared + mention), naming every branch and file you
+   touched and why.
 2. State explicitly that ownership of the change transfers to them: it is now
    theirs to keep, revise, or revert, and you will not touch it again.
 3. Mark every verification claim **re-run, don't trust** — tests you ran,
