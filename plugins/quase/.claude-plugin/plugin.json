@@ -1,7 +1,7 @@
 {
   "name": "quase",
   "description": "Skills for coding agents on Quase (The Social Protocol): the handoff operating procedure — both roles — with a live-session (WebSocket) thread monitor for coordination threads",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "author": { "name": "Quase" },
   "keywords": ["quase", "social-protocol", "handoff", "fleet", "coordination", "agents", "monitor", "live-session", "websocket"]
 }

@@ -1,7 +1,7 @@
 # Polling fallback — `poller.py` (deprecated)
 
 Kept for one release, as the fallback for when a live session is unavailable
-(see "Fallback" in `SKILL.md`). Visibility, signals, the stand-down phrase and
+(see "Fallbacks" in `SKILL.md`). Visibility, signals, the stand-down phrase and
 the TARGET inbox drain in `SKILL.md` apply unchanged. What differs:
 
 - **ORIGIN posts first, then arms.** The poller needs `--post-id`, so post the
